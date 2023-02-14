@@ -130,7 +130,7 @@ std::unique_ptr<Result> createTimeOutResult(long token) {
 
 void getData(
     PromiseHolderPtr<std::unique_ptr<Result>> promiseHolder,
-    const TaskId& taskId,
+    const std::shared_ptr<velox::exec::Task>& task,
     long bufferId,
     long token,
     protocol::DataSize maxSize,
@@ -141,11 +141,11 @@ void getData(
   }
 
   auto bufferFound = bufferManager.getData(
-      taskId,
+      task->taskId(),
       bufferId,
       maxSize.getValue(protocol::DataUnit::BYTE),
       token,
-      [taskId = taskId, bufferId = bufferId, promiseHolder](
+      [task = task, bufferId = bufferId, promiseHolder](
           std::vector<std::unique_ptr<folly::IOBuf>> pages,
           int64_t sequence) mutable {
         bool complete = pages.empty();
@@ -169,12 +169,13 @@ void getData(
           }
         }
 
-        VLOG(1) << "Task " << taskId << ", buffer " << bufferId << ", sequence "
-                << sequence << " Results size: " << bytes
+        VLOG(1) << "Task " << task->taskId() << ", buffer " << bufferId
+                << ", sequence " << sequence << " Results size: " << bytes
                 << ", page count: " << pages.size()
                 << ", complete: " << std::boolalpha << complete;
 
         auto result = std::make_unique<Result>();
+        result->task = task;
         result->sequence = sequence;
         result->nextSequence = nextSequence;
         result->complete = complete;
@@ -185,8 +186,8 @@ void getData(
 
   if (!bufferFound) {
     // Buffer was erased for current TaskId.
-    VLOG(1) << "Task " << taskId << ", buffer " << bufferId << ", sequence "
-            << token << ", buffer not found.";
+    VLOG(1) << "Task " << task->taskId() << ", buffer " << bufferId
+            << ", sequence " << token << ", buffer not found.";
     promiseHolder->promise.setValue(std::move(createTimeOutResult(token)));
   }
 }
@@ -235,6 +236,7 @@ std::unique_ptr<TaskInfo> TaskManager::createOrUpdateErrorTask(
 }
 
 void TaskManager::getDataForResultRequests(
+    const std::shared_ptr<velox::exec::Task>& task,
     const std::unordered_map<int64_t, std::shared_ptr<ResultRequest>>&
         resultRequests) {
   for (const auto& entry : resultRequests) {
@@ -245,7 +247,7 @@ void TaskManager::getDataForResultRequests(
             << ", sequence " << resultRequest->token;
     getData(
         resultRequest->promise.lock(),
-        resultRequest->taskId,
+        task,
         resultRequest->bufferId,
         resultRequest->token,
         resultRequest->maxSize,
@@ -331,7 +333,7 @@ std::unique_ptr<TaskInfo> TaskManager::createOrUpdateTask(
     infoRequest = prestoTask->infoRequest;
   }
 
-  getDataForResultRequests(resultRequests);
+  getDataForResultRequests(prestoTask->task, resultRequests);
 
   // TODO Handle possible race condition. Refer:
   // https://github.com/facebookincubator/velox/issues/3593
@@ -714,7 +716,12 @@ folly::Future<std::unique_ptr<Result>> TaskManager::getResults(
         // failed at creation time and the coordinator hasn't yet caught up.
         if (prestoTask->task->state() == exec::kRunning) {
           getData(
-              promiseHolder, taskId, bufferId, token, maxSize, *bufferManager_);
+              promiseHolder,
+              prestoTask->task,
+              bufferId,
+              token,
+              maxSize,
+              *bufferManager_);
         }
         return std::move(future).via(eventBase).onTimeout(
             std::chrono::microseconds(maxWaitMicros), timeoutFn);

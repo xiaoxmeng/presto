@@ -51,6 +51,7 @@ template <typename T>
 using PromiseHolderWeakPtr = std::weak_ptr<PromiseHolder<T>>;
 
 struct Result {
+  std::shared_ptr<velox::exec::Task> task;
   int64_t sequence;
   int64_t nextSequence;
   std::unique_ptr<folly::IOBuf> data;

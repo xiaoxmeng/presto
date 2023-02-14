@@ -71,6 +71,7 @@ class TaskManager {
   // and notifies the future.
   // Note: This method is made public for unit testing purpose only.
   void getDataForResultRequests(
+      const std::shared_ptr<velox::exec::Task>& task,
       const std::unordered_map<int64_t, std::shared_ptr<ResultRequest>>&
           resultRequests);
 

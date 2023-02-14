@@ -432,6 +432,7 @@ proxygen::RequestHandler* TaskResource::getResults(
                       result->complete ? "true" : "false")
                   .body(std::move(result->data))
                   .sendWithEOM();
+              result->data.reset();
             })
             .thenError(
                 folly::tag_t<velox::VeloxException>{},
