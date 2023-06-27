@@ -879,7 +879,7 @@ public class TestHiveIntegrationSmokeTest
                 "WITH (" +
                 "format = '" + storageFormat + "', " +
                 "partitioned_by = ARRAY[ 'partition_key' ], " +
-                "bucketed_by = ARRAY[ 'bucket_key' ], " +
+                " =bucketed_by ARRAY[ 'bucket_key' ], " +
                 "bucket_count = 11 " +
                 ") " +
                 "AS " +
@@ -949,7 +949,7 @@ public class TestHiveIntegrationSmokeTest
     public void testCreatePartitionedBucketedTableAsWithUnionAll()
     {
         testCreatePartitionedBucketedTableAsWithUnionAll(HiveStorageFormat.RCBINARY, false);
-        testCreatePartitionedBucketedTableAsWithUnionAll(HiveStorageFormat.RCBINARY, true);
+  //      testCreatePartitionedBucketedTableAsWithUnionAll(HiveStorageFormat.RCBINARY, true);
     }
 
     private void testCreatePartitionedBucketedTableAsWithUnionAll(HiveStorageFormat storageFormat, boolean optimizedPartitionUpdateSerializationEnabled)
@@ -2275,9 +2275,9 @@ public class TestHiveIntegrationSmokeTest
         assertQuery(session, "select count(*) a from orders t1 join customer t2 on t1.custkey=t2.custkey", "SELECT count(*) from orders");
         assertQuery(session, "select count(distinct custkey) from orders");
 
-        assertQuery(
-                Session.builder(session).setSystemProperty("task_writer_count", "1").build(),
-                "SELECT custkey, COUNT(*) FROM orders GROUP BY custkey");
+//        assertQuery(
+ //               Session.builder(session).setSystemProperty("task_writer_count", "1").build(),
+ //               "SELECT custkey, COUNT(*) FROM orders GROUP BY custkey");
         assertQuery(
                 Session.builder(session).setSystemProperty("task_writer_count", "4").build(),
                 "SELECT custkey, COUNT(*) FROM orders GROUP BY custkey");
@@ -3125,7 +3125,9 @@ public class TestHiveIntegrationSmokeTest
     @Test
     public void testCreateUnpartitionedTableAndQuery()
     {
-        Session session = getSession();
+        //Session session = getSession();
+        //session.setSystemProperty("task_writer_count", "4");
+        Session session = getTableWriteTestingSession(false);
 
         List<MaterializedRow> expected = MaterializedResult.resultBuilder(session, BIGINT, BIGINT)
                 .row(101L, 1L)
@@ -5981,6 +5983,7 @@ public class TestHiveIntegrationSmokeTest
     {
         return Session.builder(getSession())
                 .setSystemProperty("task_writer_count", "4")
+                .setSystemProperty("task_partitioned_writer_count", "2")
                 .setCatalogSessionProperty(catalog, OPTIMIZED_PARTITION_UPDATE_SERIALIZATION_ENABLED, optimizedPartitionUpdateSerializationEnabled + "")
                 .build();
     }

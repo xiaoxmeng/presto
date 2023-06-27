@@ -183,8 +183,8 @@ public final class HiveQueryRunner
         setupLogging();
 
         Map<String, String> systemProperties = ImmutableMap.<String, String>builder()
-                .put("task.writer-count", "2")
-                .put("task.partitioned-writer-count", "4")
+                .put("task.writer-count", "1")
+                .put("task.partitioned-writer-count", "2")
                 .put("tracing.tracer-type", "simple")
                 .put("tracing.enable-distributed-tracing", "simple")
                 .putAll(extraProperties)
@@ -192,7 +192,7 @@ public final class HiveQueryRunner
 
         DistributedQueryRunner queryRunner =
                 DistributedQueryRunner.builder(createSession(Optional.of(new SelectedRole(ROLE, Optional.of("admin")))))
-                        .setNodeCount(workerCount.orElse(4))
+                        .setNodeCount(workerCount.orElse(1))
                         .setExtraProperties(systemProperties)
                         .setCoordinatorProperties(extraCoordinatorProperties)
                         .setDataDirectory(dataDirectory)

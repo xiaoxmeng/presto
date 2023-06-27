@@ -32,7 +32,7 @@
 // clang-format on
 
 #include <folly/container/F14Set.h>
-#include "presto_cpp/main/operators/PartitionAndSerialize.h"
+#include "velox/dwio/type/fbhive/HiveTypeParser.h"
 
 using namespace facebook::velox;
 using namespace facebook::velox::exec;
@@ -44,6 +44,16 @@ namespace {
 
 TypePtr stringToType(const std::string& typeString) {
   return TypeSignatureTypeConverter::parse(typeString);
+}
+
+std::vector<TypePtr> stringToTypes(
+    const std::shared_ptr<protocol::List<protocol::Type>>& typeStrings) {
+  std::vector<TypePtr> types;
+  types.reserve(typeStrings->size());
+  for (const auto& typeString : *typeStrings) {
+    types.push_back(stringToType(typeString));
+  }
+  return types;
 }
 
 std::vector<std::string> getNames(const protocol::Assignments& assignments) {
@@ -108,6 +118,7 @@ std::vector<common::Subfield> toRequiredSubfields(
 
 std::shared_ptr<connector::ColumnHandle> toColumnHandle(
     const protocol::ColumnHandle* column) {
+  facebook::velox::dwio::type::fbhive::HiveTypeParser hiveTypeParser;
   if (auto hiveColumn =
           dynamic_cast<const protocol::HiveColumnHandle*>(column)) {
     // TODO(spershin): Should we pass something different than 'typeSignature'
@@ -116,7 +127,7 @@ std::shared_ptr<connector::ColumnHandle> toColumnHandle(
         hiveColumn->name,
         toHiveColumnType(hiveColumn->columnType),
         stringToType(hiveColumn->typeSignature),
-        stringToType(hiveColumn->typeSignature),
+        hiveTypeParser.parse(hiveColumn->hiveType),
         toRequiredSubfields(hiveColumn->requiredSubfields));
   }
 
@@ -1027,6 +1038,139 @@ core::LocalPartitionNode::Type toLocalExchangeType(
       VELOX_UNSUPPORTED("Unsupported exchange type: {}", toJsonString(type));
   }
 }
+
+std::vector<std::shared_ptr<const connector::hive::HiveColumnHandle>>
+toHiveColumns(
+    const protocol::List<protocol::HiveColumnHandle>& inputColumns,
+    bool& hasPartitionColumn) {
+  hasPartitionColumn = false;
+  std::vector<std::shared_ptr<const connector::hive::HiveColumnHandle>>
+      hiveColumns;
+  hiveColumns.reserve(inputColumns.size());
+  for (const auto& columnHandle : inputColumns) {
+    hasPartitionColumn |=
+        columnHandle.columnType == protocol::ColumnType::PARTITION_KEY;
+    hiveColumns.emplace_back(
+        std::dynamic_pointer_cast<connector::hive::HiveColumnHandle>(
+            toColumnHandle(&columnHandle)));
+  }
+  return hiveColumns;
+}
+
+HiveBucketProperty::Kind toHiveBucketPropertyKind(
+    protocol::BucketFunctionType bucketFuncType) {
+  switch (bucketFuncType) {
+    case protocol::BucketFunctionType::PRESTO_NATIVE:
+      return HiveBucketProperty::Kind::kPrestoNative;
+    case protocol::BucketFunctionType::HIVE_COMPATIBLE:
+      return HiveBucketProperty::Kind::kHiveCompatible;
+    default:
+      VELOX_USER_FAIL(
+          "Unknown hive bucket function: {}", toJsonString(bucketFuncType));
+  }
+}
+
+std::vector<std::string> fromStringList(
+    const protocol::List<protocol::String>& stringList) {
+  std::vector<std::string> stringVector;
+  stringVector.reserve(stringList.size());
+  for (const auto& string : stringList) {
+    stringVector.push_back(string);
+  }
+  return stringVector;
+}
+
+core::SortOrder toSortOrder(protocol::Order order) {
+  switch (order) {
+    case protocol::Order::ASCENDING:
+      return core::SortOrder(true, true);
+    case protocol::Order::DESCENDING:
+      return core::SortOrder(false, false);
+    default:
+      VELOX_USER_FAIL("Unknown sort order: {}", toJsonString(order));
+  }
+}
+
+std::shared_ptr<HiveSortingColumn> toHiveSortingColumn(
+    const protocol::SortingColumn& sortingColumn) {
+  return std::make_shared<HiveSortingColumn>(
+      sortingColumn.columnName, toSortOrder(sortingColumn.order));
+}
+
+std::vector<std::shared_ptr<const HiveSortingColumn>> toHiveSortingColumns(
+    const protocol::List<protocol::SortingColumn>& sortedBy) {
+  std::vector<std::shared_ptr<const HiveSortingColumn>> sortingColumns;
+  sortingColumns.reserve(sortedBy.size());
+  for (const auto& sortingColumn : sortedBy) {
+    sortingColumns.push_back(toHiveSortingColumn(sortingColumn));
+  }
+  return sortingColumns;
+}
+
+std::shared_ptr<HiveBucketProperty> toHiveBucketProperty(
+    const std::vector<std::shared_ptr<const connector::hive::HiveColumnHandle>>&
+        inputColumns,
+    const std::shared_ptr<protocol::HiveBucketProperty>& bucketProperty) {
+  if (bucketProperty == nullptr) {
+    return nullptr;
+  }
+  VELOX_USER_CHECK(
+      bucketProperty->sortedBy.empty(),
+      "Bucket table sort write is not supported: {}",
+      toJsonString(*bucketProperty));
+
+  const int32_t bucketCount = bucketProperty->bucketCount;
+  if (bucketCount <= 0) {
+    return nullptr;
+  }
+
+  const std::vector<std::string> bucketedBy =
+      fromStringList(bucketProperty->bucketedBy);
+  VELOX_USER_CHECK(
+      !bucketedBy.empty(),
+      "Bucketed by columns hasn't been set: {}",
+      toJsonString(*bucketProperty));
+
+  const HiveBucketProperty::Kind kind =
+      toHiveBucketPropertyKind(bucketProperty->bucketFunctionType);
+  std::vector<TypePtr> bucketedTypes;
+  if (kind == HiveBucketProperty::Kind::kHiveCompatible) {
+    VELOX_USER_CHECK_NULL(
+        bucketProperty->types,
+        "Unexpected bucketed by types: {}",
+        toJsonString(*bucketProperty));
+    bucketedTypes.reserve(bucketedBy.size());
+    for (const auto& bucketedColumn : bucketedBy) {
+      TypePtr bucketedType{nullptr};
+      for (const auto& inputColumn : inputColumns) {
+        if (inputColumn->name() != bucketedColumn) {
+          continue;
+        }
+        VELOX_USER_CHECK_NOT_NULL(inputColumn->hiveType());
+        bucketedType = inputColumn->hiveType();
+        break;
+      }
+      if (bucketedType == nullptr) {
+        VELOX_FAIL("bucketed by column \"{}\" not found", bucketedColumn);
+      }
+      bucketedTypes.push_back(std::move(bucketedType));
+    }
+  } else {
+    VELOX_USER_CHECK_EQ(
+        bucketProperty->types->size(),
+        bucketedBy.size(),
+        "Bucketed by types is not set properly: {}",
+        toJsonString(*bucketProperty));
+    bucketedTypes = stringToTypes(bucketProperty->types);
+  }
+  auto sortedBy = toHiveSortingColumns(bucketProperty->sortedBy);
+  return std::make_shared<HiveBucketProperty>(
+      toHiveBucketPropertyKind(bucketProperty->bucketFunctionType),
+      bucketProperty->bucketCount,
+      bucketedBy,
+      bucketedTypes,
+      sortedBy);
+}
 } // namespace
 
 core::PlanNodePtr VeloxQueryPlanConverterBase::toVeloxQueryPlan(
@@ -1808,8 +1952,6 @@ VeloxQueryPlanConverterBase::toVeloxQueryPlan(
     const std::shared_ptr<protocol::TableWriteInfo>& tableWriteInfo,
     const protocol::TaskId& taskId) {
   std::string connectorId;
-  std::vector<std::shared_ptr<const connector::hive::HiveColumnHandle>>
-      inputColumns;
   std::shared_ptr<connector::ConnectorInsertTableHandle> hiveTableHandle;
   if (auto createHandle = std::dynamic_pointer_cast<protocol::CreateHandle>(
           tableWriteInfo->writerTarget)) {
@@ -1818,21 +1960,21 @@ VeloxQueryPlanConverterBase::toVeloxQueryPlan(
     auto hiveOutputTableHandle =
         std::dynamic_pointer_cast<protocol::HiveOutputTableHandle>(
             createHandle->handle.connectorHandle);
-    VELOX_USER_CHECK_NULL(
-        hiveOutputTableHandle->bucketProperty,
-        "Bucket table write is not supported: {}",
-        toJsonString(*hiveOutputTableHandle->bucketProperty));
+    VELOX_USER_CHECK_NOT_NULL(hiveOutputTableHandle);
 
-    for (const auto& columnHandle : hiveOutputTableHandle->inputColumns) {
-      inputColumns.emplace_back(
-          std::dynamic_pointer_cast<connector::hive::HiveColumnHandle>(
-              toColumnHandle(&columnHandle)));
-    }
-
+    bool isPartitioned{false};
+    const auto inputColumns =
+        toHiveColumns(hiveOutputTableHandle->inputColumns, isPartitioned);
+    VELOX_USER_CHECK(
+        hiveOutputTableHandle->bucketProperty == nullptr || isPartitioned,
+        "Bucketed table must been partitioned: {}",
+        toJsonString(*hiveOutputTableHandle));
     hiveTableHandle = std::make_shared<connector::hive::HiveInsertTableHandle>(
         inputColumns,
         toLocationHandle(hiveOutputTableHandle->locationHandle),
-        toFileFormat(hiveOutputTableHandle->tableStorageFormat));
+        toFileFormat(hiveOutputTableHandle->tableStorageFormat),
+        toHiveBucketProperty(
+            inputColumns, hiveOutputTableHandle->bucketProperty));
   } else if (
       auto insertHandle = std::dynamic_pointer_cast<protocol::InsertHandle>(
           tableWriteInfo->writerTarget)) {
@@ -1841,25 +1983,25 @@ VeloxQueryPlanConverterBase::toVeloxQueryPlan(
     auto hiveInsertTableHandle =
         std::dynamic_pointer_cast<protocol::HiveInsertTableHandle>(
             insertHandle->handle.connectorHandle);
+    VELOX_USER_CHECK_NOT_NULL(hiveInsertTableHandle);
 
-    VELOX_USER_CHECK_NULL(
-        hiveInsertTableHandle->bucketProperty,
-        "Bucket table write is not supported: {}",
-        toJsonString(*hiveInsertTableHandle->bucketProperty));
-
-    for (const auto& columnHandle : hiveInsertTableHandle->inputColumns) {
-      inputColumns.emplace_back(
-          std::dynamic_pointer_cast<connector::hive::HiveColumnHandle>(
-              toColumnHandle(&columnHandle)));
-    }
+    bool isPartitioned{false};
+    const auto inputColumns =
+        toHiveColumns(hiveInsertTableHandle->inputColumns, isPartitioned);
+    VELOX_USER_CHECK(
+        hiveInsertTableHandle->bucketProperty == nullptr || isPartitioned,
+        "Bucketed table must been partitioned: {}",
+        toJsonString(*hiveInsertTableHandle));
 
     hiveTableHandle = std::make_shared<connector::hive::HiveInsertTableHandle>(
         inputColumns,
         toLocationHandle(hiveInsertTableHandle->locationHandle),
-        toFileFormat(hiveInsertTableHandle->tableStorageFormat));
+        toFileFormat(hiveInsertTableHandle->tableStorageFormat),
+        toHiveBucketProperty(
+            inputColumns, hiveInsertTableHandle->bucketProperty));
   } else {
     VELOX_UNSUPPORTED(
-        "Unsupported table writer handle: {}",
+        "Unsupported tabgle writer handle: {}",
         toJsonString(tableWriteInfo->writerTarget));
   }
 

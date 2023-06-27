@@ -16,6 +16,8 @@ add_subdirectory(common)
 add_subdirectory(thrift)
 add_subdirectory(connectors)
 
+include_directories(/opt/homebrew/opt/protobuf/include/)
+
 add_library(
   presto_server_lib
   Announcer.cpp
@@ -80,6 +82,7 @@ add_executable(presto_server PrestoMain.cpp)
 target_link_libraries(
   presto_server
   presto_server_lib
+  velox_dwio_type_fbhive
   velox_functions_prestosql
   velox_aggregates
   velox_hive_connector
