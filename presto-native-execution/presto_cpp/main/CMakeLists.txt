@@ -15,6 +15,8 @@ add_subdirectory(http)
 add_subdirectory(common)
 add_subdirectory(thrift)
 
+include_directories(/opt/homebrew/opt/protobuf/include/)
+
 add_library(
   presto_server_lib
   Announcer.cpp
