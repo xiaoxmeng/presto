@@ -19,7 +19,9 @@
 namespace facebook::presto::operators {
 class ShuffleReadNode : public velox::core::PlanNode {
  public:
-  ShuffleReadNode(const velox::core::PlanNodeId& id, velox::RowTypePtr type)
+  ShuffleReadNode(
+      const velox::core::PlanNodeId& id,
+      velox::RowTypePtr type)
       : PlanNode(id), outputType_(type) {}
 
   folly::dynamic serialize() const override;
@@ -54,7 +56,7 @@ class ShuffleReadNode : public velox::core::PlanNode {
     // Nothing to add
   }
 
-  velox::RowTypePtr outputType_;
+  const velox::RowTypePtr outputType_;
 };
 
 class ShuffleReadTranslator : public velox::exec::Operator::PlanNodeTranslator {
